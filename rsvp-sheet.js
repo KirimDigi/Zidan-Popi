@@ -132,9 +132,9 @@ var listOpen = false, ucapanCount = 0;
     return null;
   }
   async function sendRemote(item) {
-    if (!RSVP_SHEET_URL) return;
+    if (!RSVP_SHEET_URL) return false;
     try {
-      await fetch(RSVP_SHEET_URL, {
+      var r = await fetch(RSVP_SHEET_URL, {
         method: "POST",
         headers: { "Content-Type": "text/plain;charset=utf-8" },
         body: JSON.stringify({
@@ -143,7 +143,22 @@ var listOpen = false, ucapanCount = 0;
           timestamp: item.timestamp
         })
       });
-    } catch (e) {}
+      var j = await r.json();
+      return !!(j && j.ok);
+    } catch (e) { return false; }
+  }
+  // pending = eksplisit belum sinkron (synced===false). Data lama tanpa flag
+  // dianggap sudah sinkron agar tidak terkirim ulang jadi ganda di sheet.
+  function isPending(x) { return !!x && x.synced === false; }
+  function sameKey(a, b) {
+    return a && b && a.timestamp === b.timestamp &&
+      String(a.nama || "") === String(b.nama || "") &&
+      String(a.ucapan || "") === String(b.ucapan || "");
+  }
+  function markSynced(item) {
+    var cur = getList(), changed = false;
+    cur.forEach(function (x) { if (sameKey(x, item) && x.synced !== true) { x.synced = true; changed = true; } });
+    if (changed) setList(cur);
   }
 
   function init() {
@@ -176,12 +191,29 @@ var listOpen = false, ucapanCount = 0;
     var local = getList();
     render(local);
     loadRemote().then(function (remote) {
-      if (remote && remote.length) {
-        // Gabung: remote + lokal yang belum ada di remote (perbandingan longgar via dedupe)
-        var merged = dedupe(remote.concat(local));
+      if (!remote) return; // offline: tampilkan salinan lokal apa adanya
+      // Spreadsheet = acuan. Kirim ulang yang tertunda, lalu gabung:
+      // isi sheet + yang masih tertunda. Yang sudah sinkron tapi tak ada
+      // di sheet = sudah dihapus -> ikut hilang dari tampilan.
+      var pendings = getList().filter(isPending);
+      var justSynced = {};
+      var finish = function () {
+        var fresh = getList();
+        var keep = fresh.filter(function (x) {
+          return isPending(x) || justSynced[x.timestamp + "|" + x.nama];
+        });
+        var merged = dedupe(remote.concat(keep));
         setList(merged);
         render(merged);
-      }
+      };
+      if (!pendings.length) { finish(); return; }
+      var n = 0;
+      pendings.forEach(function (p) {
+        sendRemote(p).then(function (ok) {
+          if (ok) { markSynced(p); justSynced[p.timestamp + "|" + p.nama] = 1; }
+          if (++n === pendings.length) finish();
+        });
+      });
     });
 
     // Cegat submit SEBELUM script bawaan (capture + stopImmediatePropagation)
@@ -236,13 +268,13 @@ var listOpen = false, ucapanCount = 0;
 
       var item = {
         nama: nama, ucapan: ucapan, kehadiran: kehadiran, tamu: tamu,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(), synced: false
       };
       var list = getList();
       list.unshift(item);
       setList(list);
       render(list);
-      sendRemote(item);
+      sendRemote(item).then(function (ok) { if (ok) markSynced(item); });
 
       showStatus("Terimakasih atas ucapan Anda! Ucapanmu sudah tampil di bawah.", true);
       listOpen = true;
